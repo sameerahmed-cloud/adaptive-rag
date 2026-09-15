@@ -97,6 +97,8 @@ class APIUsageTracker:
         self.query_count = 0
         self.retrieval_nodes = 0
         self.query_duration = 0.0
+        self.sync_duration = 0.0
+        self.sync_had_ingestion = False
 
     def attach(self):
         Settings.callback_manager = self.callback_manager
@@ -152,6 +154,61 @@ class APIUsageTracker:
     def record_chunking(self, duration):
         self.chunking_duration += duration
 
+    def record_sync(self, duration):
+        self.sync_duration += duration
+
+    def print_sync_observability(self):
+        print("\n[INGESTION / INDEXING METRICS]")
+
+        print(
+            f"  Sync time:          "
+            f"{self.sync_duration:.2f}s"
+        )
+
+        if not self.sync_had_ingestion:
+            print("  LlamaParse:         No parsing performed")
+            print("  Local pipeline:     No ingestion performed")
+            return
+
+        print("  LlamaParse:")
+        if self.llama_parse_calls:
+            print(
+                f"    API calls:        "
+                f"{self.llama_parse_calls}"
+            )
+            print(
+                f"    Parse time:       "
+                f"{self.llama_parse_duration:.2f}s"
+            )
+        else:
+            print("    No parsing performed")
+
+        print("  Local pipeline:")
+        print(
+            f"    Nodes indexed:    "
+            f"{self.nodes_indexed:,}"
+        )
+        print(
+            f"    Indexing time:    "
+            f"{self.indexing_duration:.2f}s"
+        )
+        print(
+            f"    Chunking time:    "
+            f"{self.chunking_duration:.2f}s"
+        )
+        print(
+            f"    Embedding calls:  "
+            f"{self.embedding_calls}"
+        )
+        print(
+            f"    Embedding tokens: "
+            f"{self.embedding_tokens:,}"
+        )
+        print(
+            f"    Embedding time:   "
+            f"{self.embedding_duration:.2f}s"
+        )
+
     def record_query(self, query_count, duration, retrieved_nodes):
         self.query_count += 1
         self.query_duration += duration
@@ -166,13 +223,37 @@ class APIUsageTracker:
             max(0, after[1] - before_snapshot[1]),
         )
 
-    def print_query_usage(self, before_snapshot):
-        calls, input_tokens, output_tokens, total = self.query_usage_delta(before_snapshot)
-        print("\n[QUERY OBSERVABILITY]")
-        print(f"  Gemini API calls:   {calls}")
-        print(f"  Input tokens:       {input_tokens:,}  (prompt + instructions + RAG context)")
-        print(f"  Output tokens:      {output_tokens:,}  (Gemini-generated text)")
-        print(f"  Total tokens:       {total:,}")
+    def print_query_usage(
+        self,
+        before_snapshot,
+        strategy=None,
+        retrieved_nodes=None,
+        query_seconds=None,
+    ):
+        calls, input_tokens, output_tokens, total = (
+            self.query_usage_delta(before_snapshot)
+        )
+
+        print("\n[QUERY METRICS]")
+
+        print("  Retrieval:")
+        if strategy is not None:
+            print(f"    Strategy:         {strategy}")
+
+        if retrieved_nodes is not None:
+            print(f"    Retrieved nodes:  {retrieved_nodes}")
+
+        if query_seconds is not None:
+            print(
+                f"    Query time:       "
+                f"{query_seconds:.2f}s"
+            )
+
+        print("  Gemini:")
+        print(f"    API calls:        {calls}")
+        print(f"    Input tokens:     {input_tokens:,}")
+        print(f"    Output tokens:    {output_tokens:,}")
+        print(f"    Total tokens:     {total:,}")
 
     def print_summary(self):
         input_tokens = self.llm_token_counter.prompt_llm_token_count
@@ -181,11 +262,15 @@ class APIUsageTracker:
         session_seconds = time.perf_counter() - self.started_at
 
         print("\n" + "=" * 70)
-        print("                    PHASE 2 OBSERVABILITY")
+        print("                    SESSION METRICS")
         print("=" * 70)
-        print(f"SESSION TIME:         {session_seconds:.2f}s")
+
+        print("\nQUERY / RETRIEVAL")
+        print(f"  Queries:            {self.query_count}")
+        print(f"  Retrieved nodes:    {self.retrieval_nodes:,}")
+        print(f"  Query time:         {self.query_duration:.2f}s")
+
         print("\nGEMINI")
-        #print(f"  Model:              {GEMINI_MODEL}")
         print(f"  API calls:          {self.llm_calls}")
         print(f"  Input tokens:       {input_tokens:,}  (prompts + instructions + RAG context)")
         print(f"  Output tokens:      {output_tokens:,}  (Gemini-generated text)")
@@ -199,22 +284,7 @@ class APIUsageTracker:
                 f"total {usage['total_tokens']:,}"
             )
 
-        print("\nLLAMAPARSE")
-        print(f"  API calls:          {self.llama_parse_calls}")
-        print(f"  Parse time:         {self.llama_parse_duration:.2f}s")
-
-        print("\nLOCAL PIPELINE")
-        print(f"  Embedding calls:    {self.embedding_calls}")
-        print(f"  Embedding tokens:   {self.embedding_tokens:,}")
-        print(f"  Embedding time:     {self.embedding_duration:.2f}s")
-        print(f"  Nodes indexed:      {self.nodes_indexed:,}")
-        print(f"  Indexing time:      {self.indexing_duration:.2f}s")
-        print(f"  Chunking time:      {self.chunking_duration:.2f}s")
-
-        print("\nRETRIEVAL")
-        print(f"  Queries:            {self.query_count}")
-        print(f"  Retrieved nodes:    {self.retrieval_nodes:,}")
-        print(f"  Query time:         {self.query_duration:.2f}s")
+        print(f"\nTOTAL PROCESS TIME:   {session_seconds:.2f}s")
         print("=" * 70)
 
 
@@ -1831,6 +1901,9 @@ class AdaptiveRAG:
         force_rebuild: bool = False,
     ):
 
+        sync_start = time.perf_counter()
+        API_TRACKER.sync_had_ingestion = False
+
         print()
         print("=" * 70)
         print("              ADAPTIVE RAG SYNC")
@@ -1913,6 +1986,7 @@ class AdaptiveRAG:
                     relative_path
                 ]
 
+                API_TRACKER.sync_had_ingestion = True
                 nodes = self.ingest_file(
                     path=path,
                     relative_path=relative_path,
@@ -2012,6 +2086,7 @@ class AdaptiveRAG:
                     f"{relative_path}"
                 )
 
+                API_TRACKER.sync_had_ingestion = True
                 nodes = self.ingest_file(
                     path=path,
                     relative_path=relative_path,
@@ -2060,6 +2135,7 @@ class AdaptiveRAG:
                     document_id
                 )
 
+                API_TRACKER.sync_had_ingestion = True
                 nodes = self.ingest_file(
                     path=path,
                     relative_path=relative_path,
@@ -2096,6 +2172,7 @@ class AdaptiveRAG:
         )
 
         self.build_router()
+        API_TRACKER.record_sync(time.perf_counter() - sync_start)
 
     def insert_nodes(
         self,
@@ -2402,6 +2479,153 @@ class AdaptiveRAG:
         )
         return fused[:top_k]
 
+    def _assess_context_boundary(
+        self,
+        question: str,
+        retrieved_nodes: List[NodeWithScore],
+    ) -> Tuple[bool, str]:
+        """
+        Determine whether the selected nodes appear likely to need adjacent
+        chunks.
+
+        This does NOT inspect words such as 'before' or 'after' in the query.
+        The decision is based on the actual retrieved context.
+
+        Expansion is considered useful when:
+        - relevant query terms occur very close to a node boundary, or
+        - the selected node looks structurally incomplete, or
+        - the selected context is unusually small for the query.
+
+        The method remains local and does not create another Gemini call.
+        """
+
+        if not retrieved_nodes:
+            return False, "no retrieved nodes"
+
+        # Normalize meaningful query terms.
+        stop_words = {
+            "the", "a", "an", "is", "are", "was", "were",
+            "what", "when", "where", "who", "why", "how",
+            "did", "does", "do", "and", "or", "to", "of",
+            "in", "on", "for", "from", "with", "about",
+            "this", "that", "these", "those", "it", "its",
+            "be", "by", "as", "at", "which", "than",
+        }
+
+        query_terms = [
+            term
+            for term in re.findall(
+                r"[A-Za-z0-9_]+",
+                question.lower(),
+            )
+            if len(term) >= 3 and term not in stop_words
+        ]
+
+        if not query_terms:
+            return False, "no meaningful query terms"
+
+        boundary_hits = []
+
+        for item in retrieved_nodes:
+            text = item.node.get_content().strip()
+
+            if not text:
+                continue
+
+            normalized_text = text.lower()
+            text_length = len(normalized_text)
+
+            # Only examine terms that actually occur in this selected node.
+            relevant_positions = []
+
+            for term in query_terms:
+                position = normalized_text.find(term)
+
+                if position >= 0:
+                    relevant_positions.append(
+                        position / max(text_length, 1)
+                    )
+
+            if not relevant_positions:
+                continue
+
+            # A relevant term very near either edge suggests that the answer
+            # may continue into the adjacent chunk.
+            near_start = any(position <= 0.15 for position in relevant_positions)
+            near_end = any(position >= 0.85 for position in relevant_positions)
+
+            if near_start or near_end:
+                boundary_hits.append(
+                    {
+                        "node": item.node,
+                        "near_start": near_start,
+                        "near_end": near_end,
+                    }
+                )
+
+        if boundary_hits:
+            # Only expand if the corresponding neighboring node actually exists.
+            docstore_docs = self.vector_index.docstore.docs
+
+            for hit in boundary_hits:
+                node = hit["node"]
+
+                if hit["near_start"]:
+                    related = node.relationships.get(
+                        NodeRelationship.PREVIOUS
+                    )
+
+                    if related and related.node_id in docstore_docs:
+                        return True, "relevant content begins near chunk boundary"
+
+                if hit["near_end"]:
+                    related = node.relationships.get(
+                        NodeRelationship.NEXT
+                    )
+
+                    if related and related.node_id in docstore_docs:
+                        return True, "relevant content ends near chunk boundary"
+
+        # Structural incompleteness is a secondary signal.
+        for item in retrieved_nodes:
+            text = item.node.get_content().strip()
+
+            if not text:
+                continue
+
+            # These are only weak signals. We require them to occur together
+            # with an actual neighboring node.
+            looks_incomplete = (
+                text.endswith("...")
+                or text.endswith(":")
+                or text.endswith(";")
+                or text.endswith(",")
+            )
+
+            if not looks_incomplete:
+                continue
+
+            has_neighbor = (
+                (
+                    item.node.relationships.get(NodeRelationship.PREVIOUS)
+                    and item.node.relationships[
+                        NodeRelationship.PREVIOUS
+                    ].node_id in self.vector_index.docstore.docs
+                )
+                or
+                (
+                    item.node.relationships.get(NodeRelationship.NEXT)
+                    and item.node.relationships[
+                        NodeRelationship.NEXT
+                    ].node_id in self.vector_index.docstore.docs
+                )
+            )
+
+            if has_neighbor:
+                return True, "retrieved node appears structurally incomplete"
+
+        return False, "selected context appears self-contained"    
+
     def retrieve_adaptively(
         self,
         question: str,
@@ -2449,26 +2673,80 @@ class AdaptiveRAG:
             self.retrieval_top_k,
         )
 
-        # Expand each winning chunk by its immediate neighboring chunks when
-        # the parser supplied PREVIOUS/NEXT relationships.
-        postprocessor = PrevNextNodePostprocessor(
-            docstore=self.vector_index.docstore,
-            num_nodes=1,
-            mode="both",
+        should_expand, reason = self._assess_context_boundary(
+            question,
+            reranked,
         )
-        expanded = postprocessor.postprocess_nodes(reranked)
 
-        # Deduplicate while preserving reranked/expanded order.
-        unique_nodes = []
+        if not should_expand:
+            print(
+                f"[CONTEXT EXPANSION] SKIPPED | {reason}"
+            )
+            return reranked, profile.mode
+
+        print(
+            f"[CONTEXT EXPANSION] CHECK PASSED | {reason}"
+        )
+
+        expanded = []
         seen_ids = set()
-        for node_with_score in expanded:
-            node_id = node_with_score.node.node_id
-            if node_id in seen_ids:
-                continue
-            seen_ids.add(node_id)
-            unique_nodes.append(node_with_score)
+        missing_neighbors = 0
 
-        return unique_nodes, profile.mode
+        docstore_docs = self.vector_index.docstore.docs
+
+        for node_with_score in reranked:
+
+            current_id = node_with_score.node.node_id
+
+            if current_id not in seen_ids:
+                seen_ids.add(current_id)
+                expanded.append(node_with_score)
+
+            for relationship in (
+                NodeRelationship.PREVIOUS,
+                NodeRelationship.NEXT,
+            ):
+                related = node_with_score.node.relationships.get(
+                    relationship
+                )
+
+                if related is None:
+                    continue
+
+                neighbor_id = related.node_id
+
+                # Safe lookup. A stale/missing relationship can never
+                # crash retrieval.
+                neighbor = docstore_docs.get(neighbor_id)
+
+                if neighbor is None:
+                    missing_neighbors += 1
+                    continue
+
+                if neighbor_id in seen_ids:
+                    continue
+
+                seen_ids.add(neighbor_id)
+
+                expanded.append(
+                    NodeWithScore(
+                        node=neighbor,
+                        score=node_with_score.score,
+                    )
+                )
+
+        print(
+            f"[CONTEXT EXPANSION] USED | "
+            f"{len(reranked)} → {len(expanded)} nodes"
+        )
+
+        if missing_neighbors:
+            print(
+                f"[CONTEXT EXPANSION] "
+                f"Skipped {missing_neighbors} missing neighbor references"
+            )
+
+        return expanded, profile.mode
 
     def synthesize_answer(
         self,
@@ -2530,7 +2808,8 @@ class AdaptiveRAG:
             if not self.load_indexes():
                 return None
 
-        self.rebuild_lexical_index()
+        if not self.lexical_index.built:
+            self.rebuild_lexical_index()
 
         if self.summary_index is not None:
             self.engine = self.summary_index.as_query_engine(
@@ -2668,7 +2947,10 @@ class AdaptiveRAG:
                     len(retrieved_contexts),
                 )
                 API_TRACKER.print_query_usage(
-                    llm_before
+                    llm_before,
+                    strategy=profile.mode,
+                    retrieved_nodes=len(retrieved_contexts),
+                    query_seconds=query_seconds,
                 )
 
                 print(
@@ -2686,27 +2968,27 @@ class AdaptiveRAG:
             )
 
             correction_prompt = f"""
-You previously generated an ANSWER that contained fabrications, inferences,
-or assumptions not explicitly backed by the verified CONTEXT.
-Rewrite the response completely.
+                You previously generated an ANSWER that contained fabrications, inferences,
+                or assumptions not explicitly backed by the verified CONTEXT.
+                Rewrite the response completely.
 
-CRITICAL RULES:
-1. Rely ONLY on clear facts explicitly stated in CONTEXT.
-2. Do NOT extrapolate, assume, or use outside knowledge.
-3. If the context does not explicitly contain the answer, say:
-   "The provided documentation does not contain this information."
+                CRITICAL RULES:
+                1. Rely ONLY on clear facts explicitly stated in CONTEXT.
+                2. Do NOT extrapolate, assume, or use outside knowledge.
+                3. If the context does not explicitly contain the answer, say:
+                "The provided documentation does not contain this information."
 
-VERIFIED CONTEXT:
-\"\"\"{unified_context}\"\"\"
+                VERIFIED CONTEXT:
+                \"\"\"{unified_context}\"\"\"
 
-YOUR PREVIOUS ANSWER:
-\"\"\"{generated_answer}\"\"\"
+                YOUR PREVIOUS ANSWER:
+                \"\"\"{generated_answer}\"\"\"
 
-ORIGINAL USER QUESTION:
-"{question}"
+                ORIGINAL USER QUESTION:
+                "{question}"
 
-Provide the corrected, strictly factual answer.
-"""
+                Provide the corrected, strictly factual answer.
+            """
             try:
                 correction_before = (
                     API_TRACKER.llm_snapshot()
@@ -2800,6 +3082,7 @@ if __name__ == "__main__":
     rag.sync(
         force_rebuild=False
     )
+    API_TRACKER.print_sync_observability()
     print("--> [SYSTEM LOG] Synchronized successfully. Knowledge base is online.")
 
     print("\n" + "=" * 60)
@@ -2813,6 +3096,7 @@ if __name__ == "__main__":
             
             if user_query.lower() in {"exit", "quit"}:
                 print("\n--> [SYSTEM LOG] Shutting down connection layers. Goodbye.")
+                API_TRACKER.print_summary()
                 break
                 
             if not user_query:
@@ -2827,7 +3111,7 @@ if __name__ == "__main__":
                 user_query,
                 rag_mode=rag_mode,
             )
-            API_TRACKER.print_summary()
+            
             
         except KeyboardInterrupt:
             print("\n\n--> [SYSTEM LOG] System execution interrupted by user. Closing safely.")
