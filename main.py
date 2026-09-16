@@ -44,17 +44,7 @@ from llama_index.readers.file import HTMLTagReader
 
 from llama_index.core.ingestion import IngestionPipeline
 
-from llama_index.core.query_engine import RouterQueryEngine
-
-from llama_index.core.selectors import LLMSingleSelector
-
-from llama_index.core.tools import (
-    QueryEngineTool,
-    ToolMetadata,
-)
-
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, NodeWithScore
-from llama_index.core.postprocessor import PrevNextNodePostprocessor
 
 from llama_index.llms.google_genai import GoogleGenAI
 
@@ -99,6 +89,11 @@ class APIUsageTracker:
         self.query_duration = 0.0
         self.sync_duration = 0.0
         self.sync_had_ingestion = False
+
+        # Phase 6: RAG quality evaluation
+        self.evaluation_count = 0
+        self.evaluation_failures = 0
+        self.self_corrections = 0
 
     def attach(self):
         Settings.callback_manager = self.callback_manager
@@ -255,6 +250,14 @@ class APIUsageTracker:
         print(f"    Output tokens:    {output_tokens:,}")
         print(f"    Total tokens:     {total:,}")
 
+    def record_evaluation(self, failed: bool = False):
+        self.evaluation_count += 1
+        if failed:
+            self.evaluation_failures += 1
+
+    def record_self_correction(self):
+        self.self_corrections += 1
+
     def print_summary(self):
         input_tokens = self.llm_token_counter.prompt_llm_token_count
         output_tokens = self.llm_token_counter.completion_llm_token_count
@@ -283,6 +286,11 @@ class APIUsageTracker:
                 f"output {usage['output_tokens']:,} | "
                 f"total {usage['total_tokens']:,}"
             )
+
+        print("\nRAG QUALITY")
+        print(f"  Evaluations:        {self.evaluation_count}")
+        print(f"  Evaluation errors:  {self.evaluation_failures}")
+        print(f"  Self-corrections:   {self.self_corrections}")
 
         print(f"\nTOTAL PROCESS TIME:   {session_seconds:.2f}s")
         print("=" * 70)
@@ -2022,6 +2030,7 @@ class AdaptiveRAG:
             )
 
             self.build_router()
+            API_TRACKER.record_sync(time.perf_counter() - sync_start)
 
             return
 
@@ -2820,40 +2829,126 @@ class AdaptiveRAG:
 
         return self.engine
 
-    def evaluate_faithfulness(self, answer: str, contexts: list) -> bool:
-        
-        if not contexts:
-            return False
-        
-        unified_context = "\n---\n".join(contexts)
-        
-        eval_prompt = f"""
-        You are a strict, independent Quality Assurance Auditor.
-        Your sole task is to compare the given ANSWER against the verified CONTEXT text blocks.
-        Determine if the ANSWER contains any fabrications, assumptions, extrapolations, or claims NOT explicitly proven by the CONTEXT.
-
-        CONTEXT:
-        \"\"\"{unified_context}\"\"\"
-
-        ANSWER:
-        \"\"\"{answer}\"\"\"
-
-        Respond STRICTLY with one single word: 
-        - Respond 'SAFE' if every single claim in the answer is 100% accurate and proven by the context.
-        - Respond 'HALLUCINATION' if the answer contains any unproven claims, guesses, or inferences.
-        
-        Do not include any introductory remarks, punctuation, explanations, or markdown boxes. One word only.
+    def evaluate_rag_response(
+        self,
+        question: str,
+        answer: str,
+        contexts: List[str],
+    ) -> Dict:
         """
+        Evaluate whether a generated answer is grounded in retrieved evidence.
+
+        a single structured LLM judge for three complementary
+        checks: context relevance, answer faithfulness, and completeness.
+        The evaluator fails closed if the judge cannot return a valid result.
+        """
+        if not contexts:
+            API_TRACKER.record_evaluation(failed=True)
+            return {
+                "relevant": False,
+                "faithful": False,
+                "complete": False,
+                "verdict": "FAIL",
+                "issues": ["No retrieval context was available."],
+            }
+
+        unified_context = "\n---\n".join(contexts)
+
+        eval_prompt = f"""
+            You are a strict RAG quality evaluator.
+            Evaluate the ANSWER only against the supplied CONTEXT and the QUESTION.
+            Do not use outside knowledge.
+
+            Evaluate three dimensions:
+            1. relevant: Does the CONTEXT contain evidence needed to answer the question?
+            2. faithful: Is every factual claim in the ANSWER directly supported by the CONTEXT?
+            3. complete: Does the ANSWER address all material parts of the QUESTION that the CONTEXT supports?
+
+            Important:
+            - Do not require the exact wording of the answer to appear in the context.
+            - Simple arithmetic is allowed only when every input value is explicitly present in the context.
+            - Do not treat plausible inference, outside knowledge, or unstated assumptions as supported.
+            - If the context does not contain enough evidence, relevant should be false.
+            - If the answer correctly says the documentation does not contain the requested information when the context lacks it, faithful and complete may be true, but relevant remains false.
+
+            Return ONLY valid JSON matching exactly this schema:
+            {{
+            "relevant": true,
+            "faithful": true,
+            "complete": true,
+            "verdict": "PASS",
+            "issues": []
+            }}
+
+            Use verdict "PASS" only when relevant, faithful, and complete are all true.
+            Otherwise use "FAIL" and list concise issues explaining the failed dimensions.
+
+            QUESTION:
+            {question}
+
+            ANSWER:
+            {answer}
+
+            CONTEXT:
+            [BEGIN CONTEXT]
+            {unified_context}
+            [END CONTEXT]
+"""
+
         try:
             llm_before = API_TRACKER.llm_snapshot()
-            result = Settings.llm.complete(eval_prompt).text.strip().upper()
+            result = Settings.llm.complete(eval_prompt).text.strip()
             API_TRACKER.record_llm_operation(
-                "faithfulness_evaluation",
+                "rag_quality_evaluation",
                 llm_before,
             )
-            return "SAFE" in result
-        except Exception:
-            return True 
+
+            evaluation = json.loads(repair_json(result))
+
+            required = {"relevant", "faithful", "complete", "verdict", "issues"}
+            if not required.issubset(evaluation):
+                raise ValueError("Evaluator response is missing required fields.")
+
+            evaluation["relevant"] = bool(evaluation["relevant"])
+            evaluation["faithful"] = bool(evaluation["faithful"])
+            evaluation["complete"] = bool(evaluation["complete"])
+            evaluation["verdict"] = str(evaluation["verdict"]).upper()
+            evaluation["issues"] = list(evaluation["issues"] or [])
+
+            evaluation["verdict"] = (
+                "PASS"
+                if evaluation["relevant"]
+                and evaluation["faithful"]
+                and evaluation["complete"]
+                else "FAIL"
+            )
+
+            API_TRACKER.record_evaluation(
+                failed=evaluation["verdict"] != "PASS"
+            )
+            return evaluation
+
+        except Exception as error:
+            API_TRACKER.record_evaluation(failed=True)
+            return {
+                "relevant": False,
+                "faithful": False,
+                "complete": False,
+                "verdict": "FAIL",
+                "issues": [
+                    f"RAG quality evaluation failed: {error}"
+                ],
+            }
+
+    def print_evaluation(self, evaluation: Dict):
+        print("\n[RAG QUALITY EVALUATION]")
+        print(f"  Retrieval relevance: {'PASS' if evaluation['relevant'] else 'FAIL'}")
+        print(f"  Faithfulness:        {'PASS' if evaluation['faithful'] else 'FAIL'}")
+        print(f"  Completeness:        {'PASS' if evaluation['complete'] else 'FAIL'}")
+        print(f"  Verdict:             {evaluation['verdict']}")
+        if evaluation["issues"]:
+            for issue in evaluation["issues"]:
+                print(f"  Issue:               {issue}")
 
     def ask(
         self,
@@ -2920,7 +3015,7 @@ class AdaptiveRAG:
             ]
 
         API_TRACKER.record_llm_operation(
-            "query_routing_and_answer",
+            "answer_generation",
             llm_before,
         )
 
@@ -2929,79 +3024,71 @@ class AdaptiveRAG:
         )
 
         attempt = 0
+        evaluation = None
+
         while attempt < max_retries:
             attempt += 1
 
-            is_faithful = self.evaluate_faithfulness(
-                generated_answer,
-                retrieved_contexts,
+            evaluation = self.evaluate_rag_response(
+                question=question,
+                answer=generated_answer,
+                contexts=retrieved_contexts,
             )
 
-            if is_faithful:
-                query_seconds = (
-                    time.perf_counter() - query_start
-                )
-                API_TRACKER.record_query(
-                    1,
-                    query_seconds,
-                    len(retrieved_contexts),
-                )
-                API_TRACKER.print_query_usage(
-                    llm_before,
-                    strategy=profile.mode,
-                    retrieved_nodes=len(retrieved_contexts),
-                    query_seconds=query_seconds,
-                )
+            self.print_evaluation(evaluation)
 
-                print(
-                    f"\n[ANSWER] "
-                    f"(Verified Factual on Attempt {attempt})"
-                )
-                print(generated_answer)
-                print("=" * 70)
-                return generated_answer
+            if evaluation["verdict"] == "PASS":
+                break
+
+            if attempt >= max_retries:
+                break
 
             print(
-                f"[AUDIT WARNING] Attempt {attempt} "
-                f"failed factuality check. "
-                f"Running self-correction..."
+                f"[AUDIT WARNING] Attempt {attempt} failed RAG quality "
+                f"evaluation. Running self-correction..."
             )
 
             correction_prompt = f"""
-                You previously generated an ANSWER that contained fabrications, inferences,
-                or assumptions not explicitly backed by the verified CONTEXT.
-                Rewrite the response completely.
+                You are correcting a RAG answer that failed a strict quality evaluation.
+                Rewrite the answer using ONLY the supplied VERIFIED CONTEXT.
 
-                CRITICAL RULES:
-                1. Rely ONLY on clear facts explicitly stated in CONTEXT.
-                2. Do NOT extrapolate, assume, or use outside knowledge.
-                3. If the context does not explicitly contain the answer, say:
+                Rules:
+                1. Every factual claim must be directly supported by the context.
+                2. Do not use outside knowledge.
+                3. Do not invent or approximate numbers, dates, names, identifiers, or relationships.
+                4. Simple arithmetic is allowed only when every input value is explicitly present in the context.
+                5. Address every material part of the user's question that the context supports.
+                6. If the context does not contain enough information, say exactly:
                 "The provided documentation does not contain this information."
+                7. Do not mention the evaluation process.
+
+                EVALUATION ISSUES:
+                {json.dumps(evaluation["issues"], ensure_ascii=False)}
+
+                QUESTION:
+                {question}
 
                 VERIFIED CONTEXT:
-                \"\"\"{unified_context}\"\"\"
+                [BEGIN CONTEXT]
+                {unified_context}
+                [END CONTEXT]
 
-                YOUR PREVIOUS ANSWER:
-                \"\"\"{generated_answer}\"\"\"
+                PREVIOUS ANSWER:
+                {generated_answer}
 
-                ORIGINAL USER QUESTION:
-                "{question}"
+                Provide only the corrected answer.
+"""
 
-                Provide the corrected, strictly factual answer.
-            """
             try:
-                correction_before = (
-                    API_TRACKER.llm_snapshot()
-                )
-                generated_answer = (
-                    Settings.llm.complete(
-                        correction_prompt
-                    ).text.strip()
-                )
+                correction_before = API_TRACKER.llm_snapshot()
+                generated_answer = Settings.llm.complete(
+                    correction_prompt
+                ).text.strip()
                 API_TRACKER.record_llm_operation(
                     "self_correction",
                     correction_before,
                 )
+                API_TRACKER.record_self_correction()
             except Exception as error:
                 print(
                     f"--> [ERROR] Network drop during "
@@ -3018,8 +3105,19 @@ class AdaptiveRAG:
             len(retrieved_contexts),
         )
         API_TRACKER.print_query_usage(
-            llm_before
+            llm_before,
+            strategy=profile.mode,
+            retrieved_nodes=len(retrieved_contexts),
+            query_seconds=query_seconds,
         )
+
+        if evaluation and evaluation["verdict"] == "PASS":
+            print(
+                f"\\n[ANSWER] (Verified on Attempt {attempt})"
+            )
+            print(generated_answer)
+            print("=" * 70)
+            return generated_answer
 
         print(
             "[GUARDRAIL BLOCK] Maximum self-correction "
@@ -3086,7 +3184,7 @@ if __name__ == "__main__":
     print("--> [SYSTEM LOG] Synchronized successfully. Knowledge base is online.")
 
     print("\n" + "=" * 60)
-    print("CONTAINERIZED ENTERPRISE RAG KNOWLEDGE BASE CORE")
+    print("ADAPTIVE RAG KNOWLEDGE BASE")
     print("  Type your questions below. Type 'exit' or 'quit' to close.")
     print("=" * 60 + "\n")
 
