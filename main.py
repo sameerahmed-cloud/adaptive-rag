@@ -10,7 +10,7 @@ import warnings
 import uuid
 import time
 import math
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, OrderedDict
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -79,6 +79,8 @@ class APIUsageTracker:
         self.embedding_calls = 0
         self.embedding_tokens = 0
         self.embedding_duration = 0.0
+        self.query_embedding_duration = 0.0
+        self.embedding_batches = 0
         self.nodes_indexed = 0
         self.indexing_duration = 0.0
         self.chunking_duration = 0.0
@@ -90,10 +92,21 @@ class APIUsageTracker:
         self.sync_duration = 0.0
         self.sync_had_ingestion = False
 
-        # Phase 6: RAG quality evaluation
+        # RAG quality evaluation
         self.evaluation_count = 0
         self.evaluation_failures = 0
         self.self_corrections = 0
+
+        # Performance / efficiency observability
+        self.persist_count = 0
+        self.persist_duration = 0.0
+        self.lexical_rebuild_count = 0
+        self.lexical_rebuild_duration = 0.0
+        self.retriever_cache_hits = 0
+        self.retriever_cache_misses = 0
+        self.query_retrieval_duration = 0.0
+        self.query_generation_duration = 0.0
+        self.query_evaluation_duration = 0.0
 
     def attach(self):
         Settings.callback_manager = self.callback_manager
@@ -134,13 +147,19 @@ class APIUsageTracker:
         self.llama_parse_calls += 1
         self.llama_parse_duration += duration
 
-    def record_embedding_delta(self, before_snapshot, duration=0.0):
+    def record_embedding_delta(self, before_snapshot):
         after = self.embedding_snapshot()
         calls = max(0, after[0] - before_snapshot[0])
         tokens = max(0, after[1] - before_snapshot[1])
         self.embedding_calls += calls
         self.embedding_tokens += tokens
+
+    def record_embedding_time(self, duration):
         self.embedding_duration += duration
+        self.embedding_batches += 1
+
+    def record_query_embedding_time(self, duration):
+        self.query_embedding_duration += duration
 
     def record_indexing(self, duration, nodes):
         self.indexing_duration += duration
@@ -203,6 +222,9 @@ class APIUsageTracker:
             f"    Embedding time:   "
             f"{self.embedding_duration:.2f}s"
         )
+        print(
+            f"    Embedding batches:{self.embedding_batches}"
+        )
 
     def record_query(self, query_count, duration, retrieved_nodes):
         self.query_count += 1
@@ -258,6 +280,30 @@ class APIUsageTracker:
     def record_self_correction(self):
         self.self_corrections += 1
 
+    def record_persist(self, duration):
+        self.persist_count += 1
+        self.persist_duration += duration
+
+    def record_lexical_rebuild(self, duration):
+        self.lexical_rebuild_count += 1
+        self.lexical_rebuild_duration += duration
+
+    def record_retriever_cache(self, hit: bool):
+        if hit:
+            self.retriever_cache_hits += 1
+        else:
+            self.retriever_cache_misses += 1
+
+    def record_query_stages(
+        self,
+        retrieval=0.0,
+        generation=0.0,
+        evaluation=0.0,
+    ):
+        self.query_retrieval_duration += retrieval
+        self.query_generation_duration += generation
+        self.query_evaluation_duration += evaluation
+
     def print_summary(self):
         input_tokens = self.llm_token_counter.prompt_llm_token_count
         output_tokens = self.llm_token_counter.completion_llm_token_count
@@ -289,8 +335,19 @@ class APIUsageTracker:
 
         print("\nRAG QUALITY")
         print(f"  Evaluations:        {self.evaluation_count}")
-        print(f"  Evaluation errors:  {self.evaluation_failures}")
+        print(f"  Evaluation failures:  {self.evaluation_failures}")
         print(f"  Self-corrections:   {self.self_corrections}")
+
+        print("\nPERFORMANCE")
+        print(f"  Index persists:     {self.persist_count}")
+        print(f"  Persist time:       {self.persist_duration:.2f}s")
+        print(f"  Lexical rebuilds:   {self.lexical_rebuild_count}")
+        print(f"  Lexical rebuild:    {self.lexical_rebuild_duration:.2f}s")
+        print(f"  Retrieval cache:    {self.retriever_cache_hits} hits / {self.retriever_cache_misses} misses")
+        print(f"  Retrieval time:     {self.query_retrieval_duration:.2f}s")
+        print(f"  Query embedding:    {self.query_embedding_duration:.2f}s")
+        print(f"  Generation time:    {self.query_generation_duration:.2f}s")
+        print(f"  Evaluation time:    {self.query_evaluation_duration:.2f}s")
 
         print(f"\nTOTAL PROCESS TIME:   {session_seconds:.2f}s")
         print("=" * 70)
@@ -298,6 +355,44 @@ class APIUsageTracker:
 
 API_TRACKER = APIUsageTracker()
 API_TRACKER.attach()
+
+
+class TimedHuggingFaceEmbedding(HuggingFaceEmbedding):
+    """Time the actual local HuggingFace embedding operations.
+
+    LlamaIndex callback counters tell us that embeddings occurred, but the
+    metric also needs elapsed model time. Timing the concrete
+    implementation avoids mixing embedding work with indexing/persistence.
+    """
+
+    def _get_text_embeddings(self, texts):
+        start = time.perf_counter()
+        try:
+            return super()._get_text_embeddings(texts)
+        finally:
+            API_TRACKER.record_embedding_time(time.perf_counter() - start)
+
+    async def _aget_text_embeddings(self, texts):
+        start = time.perf_counter()
+        try:
+            return await super()._aget_text_embeddings(texts)
+        finally:
+            API_TRACKER.record_embedding_time(time.perf_counter() - start)
+
+    def _get_query_embedding(self, query):
+        start = time.perf_counter()
+        try:
+            return super()._get_query_embedding(query)
+        finally:
+            API_TRACKER.record_query_embedding_time(time.perf_counter() - start)
+
+    async def _aget_query_embedding(self, query):
+        start = time.perf_counter()
+        try:
+            return await super()._aget_query_embedding(query)
+        finally:
+            API_TRACKER.record_query_embedding_time(time.perf_counter() - start)
+
 
 
 # ENVIRONMENT
@@ -341,7 +436,7 @@ Settings.llm = GoogleGenAI(
     model="models/gemini-3.1-flash-lite"
 )
 
-Settings.embed_model = HuggingFaceEmbedding(
+Settings.embed_model = TimedHuggingFaceEmbedding(
     model_name="BAAI/bge-small-en-v1.5"
 )
 
@@ -1672,11 +1767,23 @@ class AdaptiveRAG:
 
         self.db_client = qdrant_client.QdrantClient(url="http://localhost:6333")
 
-        # Phase 5: adaptive retrieval configuration.
+        # Adaptive retrieval configuration.
         self.lexical_index = LexicalIndex()
         self.retrieval_top_k = 5
         self.candidate_top_k = 12
         self.default_rag_mode = "auto"
+
+        
+        # This can skip a repeated vector/lexical search while remaining
+        # bounded and invalidated whenever the knowledge base changes.
+        self._retrieval_cache = OrderedDict()
+        self._retrieval_cache_size = 32
+        self._summary_query_engine = None
+
+    def _invalidate_query_caches(self):
+        """Invalidate query objects whenever the underlying index changes."""
+        self._retrieval_cache.clear()
+        self._summary_query_engine = None
 
     def indexes_exist(self) -> bool:
 
@@ -1724,25 +1831,30 @@ class AdaptiveRAG:
             )
         )
 
-        self.rebuild_lexical_index()
+        self._invalidate_query_caches()
 
         return True
 
     def persist_indexes(self):
-
+        
         if self.vector_index is None and self.summary_index is None:
             return
 
+        storage_context = None
+        if self.vector_index is not None:
+            storage_context = self.vector_index.storage_context
+        elif self.summary_index is not None:
+            storage_context = self.summary_index.storage_context
+
+        if storage_context is None:
+            return
+
         print("--> [PERSIST] Saving index state...")
-
-        self.vector_index.storage_context.persist(
+        persist_start = time.perf_counter()
+        storage_context.persist(
             persist_dir=str(STORAGE_DIR)
         )
-
-        self.summary_index.storage_context.persist(
-            persist_dir=str(STORAGE_DIR)
-        )
-
+        API_TRACKER.record_persist(time.perf_counter() - persist_start)
         print("--> [PERSIST] Index state saved.")
 
     def create_indexes(
@@ -1788,6 +1900,7 @@ class AdaptiveRAG:
             self.SUMMARY_INDEX_ID
         )
 
+        self._invalidate_query_caches()
         self.persist_indexes()
 
         API_TRACKER.record_indexing(
@@ -1800,6 +1913,8 @@ class AdaptiveRAG:
     def delete_document_from_indexes(
         self,
         document_id: str,
+        persist: bool = True,
+        rebuild_lexical: bool = True,
     ):
 
         print(
@@ -1852,8 +1967,11 @@ class AdaptiveRAG:
                     f"{document_id}: {error}"
                 ) from error
             
-        self.persist_indexes()
-        self.rebuild_lexical_index()
+        self._invalidate_query_caches()
+        if persist:
+            self.persist_indexes()
+        if rebuild_lexical:
+            self.rebuild_lexical_index()
 
 
     def ingest_file(
@@ -1911,6 +2029,7 @@ class AdaptiveRAG:
 
         sync_start = time.perf_counter()
         API_TRACKER.sync_had_ingestion = False
+        sync_had_mutations = False
 
         print()
         print("=" * 70)
@@ -2066,8 +2185,11 @@ class AdaptiveRAG:
             )
 
             self.delete_document_from_indexes(
-                document_id
+                document_id,
+                persist=False,
+                rebuild_lexical=False,
             )
+            sync_had_mutations = True
 
             del self.manifest[
                 relative_path
@@ -2108,8 +2230,11 @@ class AdaptiveRAG:
                 )
 
                 self.insert_nodes(
-                    nodes
+                    nodes,
+                    persist=False,
+                    rebuild_lexical=False,
                 )
+                sync_had_mutations = True
 
                 self.manifest[
                     relative_path
@@ -2141,8 +2266,11 @@ class AdaptiveRAG:
                 )
 
                 self.delete_document_from_indexes(
-                    document_id
+                    document_id,
+                    persist=False,
+                    rebuild_lexical=False,
                 )
+                sync_had_mutations = True
 
                 API_TRACKER.sync_had_ingestion = True
                 nodes = self.ingest_file(
@@ -2153,8 +2281,11 @@ class AdaptiveRAG:
                 )
 
                 self.insert_nodes(
-                    nodes
+                    nodes,
+                    persist=False,
+                    rebuild_lexical=False,
                 )
+                sync_had_mutations = True
 
                 self.manifest[
                     relative_path
@@ -2174,18 +2305,27 @@ class AdaptiveRAG:
             self.manifest
         )
 
+        if sync_had_mutations:
+            self.persist_indexes()
+            self.rebuild_lexical_index()
+            self.build_router()
+        else:
+            # No index mutation means cached query objects remain valid.
+            self.build_router()
+
         print()
         print(
             "--> [DONE] "
             "RAG synchronized successfully."
         )
 
-        self.build_router()
         API_TRACKER.record_sync(time.perf_counter() - sync_start)
 
     def insert_nodes(
         self,
         nodes,
+        persist: bool = True,
+        rebuild_lexical: bool = True,
     ):
 
         if not nodes:
@@ -2223,13 +2363,16 @@ class AdaptiveRAG:
                     nodes
                 )
 
-            self.persist_indexes()
+            self._invalidate_query_caches()
+            if persist:
+                self.persist_indexes()
             API_TRACKER.record_indexing(
             time.perf_counter() - index_start,
             len(nodes),
             )
             API_TRACKER.record_embedding_delta(embedding_before)
-            self.rebuild_lexical_index()
+            if rebuild_lexical:
+                self.rebuild_lexical_index()
 
         except Exception as error:
 
@@ -2239,13 +2382,21 @@ class AdaptiveRAG:
             ) from error
 
     def rebuild_lexical_index(self):
-        """Rebuild the local lexical index from the persisted node docstore."""
+        """Rebuild the local lexical index from the current node docstore."""
+        rebuild_start = time.perf_counter()
+
         if self.vector_index is None:
             self.lexical_index = LexicalIndex()
+            API_TRACKER.record_lexical_rebuild(
+                time.perf_counter() - rebuild_start
+            )
             return
 
         nodes = list(self.vector_index.docstore.docs.values())
         self.lexical_index.build(nodes)
+        API_TRACKER.record_lexical_rebuild(
+            time.perf_counter() - rebuild_start
+        )
 
         print(
             f"--> [RETRIEVAL] Lexical index rebuilt: "
@@ -2386,10 +2537,49 @@ class AdaptiveRAG:
         question: str,
         top_k: int,
     ) -> List[NodeWithScore]:
+        if self.vector_index is None:
+            return []
+
+        # Retriever construction is cheap. Cache the retrieval results below,
+        # because that is the operation that actually avoids a repeated search.
         retriever = self.vector_index.as_retriever(
             similarity_top_k=top_k
         )
         return retriever.retrieve(question)
+
+    @staticmethod
+    def _normalize_cache_question(question: str) -> str:
+        return " ".join(question.lower().split())
+
+    def _retrieval_cache_key(self, question: str, profile: QueryProfile):
+        return (
+            self._normalize_cache_question(question),
+            profile.mode,
+            self.candidate_top_k,
+            self.retrieval_top_k,
+        )
+
+    def _get_cached_retrieval(self, key):
+        cached = self._retrieval_cache.get(key)
+        if cached is None:
+            API_TRACKER.record_retriever_cache(False)
+            return None
+
+        self._retrieval_cache.move_to_end(key)
+        API_TRACKER.record_retriever_cache(True)
+        return [
+            NodeWithScore(node=item.node, score=item.score)
+            for item in cached
+        ]
+
+    def _cache_retrieval(self, key, nodes):
+        self._retrieval_cache[key] = [
+            NodeWithScore(node=item.node, score=item.score)
+            for item in nodes
+        ]
+        self._retrieval_cache.move_to_end(key)
+        while len(self._retrieval_cache) > self._retrieval_cache_size:
+            self._retrieval_cache.popitem(last=False)
 
     def _rerank(
         self,
@@ -2401,8 +2591,7 @@ class AdaptiveRAG:
         Lightweight local reranker.
 
         It preserves the retriever score while rewarding query-term coverage
-        and exact phrase matches. This keeps Phase 5 dependency-free; a
-        cross-encoder can be evaluated later if testing shows it is needed.
+        and exact phrase matches. Cross-encoder can be evaluated later if testing shows it is needed.
         """
         query_terms = set(
             LexicalIndex.tokenize(question)
@@ -2644,6 +2833,14 @@ class AdaptiveRAG:
         if profile.mode == "summary":
             return None, "summary"
 
+        cache_key = self._retrieval_cache_key(question, profile)
+        cached = self._get_cached_retrieval(cache_key)
+        if cached is not None:
+            print("[RETRIEVAL CACHE] HIT | reused previous retrieval results")
+            return cached, profile.mode
+
+        print("[RETRIEVAL CACHE] MISS | running retrieval")
+
         if profile.mode == "semantic":
             candidates = self._vector_retrieve(
                 question,
@@ -2691,6 +2888,7 @@ class AdaptiveRAG:
             print(
                 f"[CONTEXT EXPANSION] SKIPPED | {reason}"
             )
+            self._cache_retrieval(cache_key, reranked)
             return reranked, profile.mode
 
         print(
@@ -2755,6 +2953,7 @@ class AdaptiveRAG:
                 f"Skipped {missing_neighbors} missing neighbor references"
             )
 
+        self._cache_retrieval(cache_key, expanded)
         return expanded, profile.mode
 
     def synthesize_answer(
@@ -2809,8 +3008,7 @@ class AdaptiveRAG:
         """
         Prepare retrieval state.
 
-        Phase 5 no longer asks an LLM to choose only between vector and
-        summary engines. Query profiling now selects semantic, keyword,
+        Query profiling now selects semantic, keyword,
         hybrid, or summary retrieval explicitly or automatically.
         """
         if self.vector_index is None:
@@ -2821,9 +3019,11 @@ class AdaptiveRAG:
             self.rebuild_lexical_index()
 
         if self.summary_index is not None:
-            self.engine = self.summary_index.as_query_engine(
-                response_mode="tree_summarize",
-            )
+            if self._summary_query_engine is None:
+                self._summary_query_engine = self.summary_index.as_query_engine(
+                    response_mode="tree_summarize",
+                )
+            self.engine = self._summary_query_engine
         else:
             self.engine = None
 
@@ -2838,7 +3038,7 @@ class AdaptiveRAG:
         """
         Evaluate whether a generated answer is grounded in retrieved evidence.
 
-        a single structured LLM judge for three complementary
+        Uses a single structured LLM judge for three complementary
         checks: context relevance, answer faithfulness, and completeness.
         The evaluator fails closed if the judge cannot return a valid result.
         """
@@ -2849,6 +3049,7 @@ class AdaptiveRAG:
                 "faithful": False,
                 "complete": False,
                 "verdict": "FAIL",
+                "evaluation_error": False,
                 "issues": ["No retrieval context was available."],
             }
 
@@ -2914,6 +3115,7 @@ class AdaptiveRAG:
             evaluation["complete"] = bool(evaluation["complete"])
             evaluation["verdict"] = str(evaluation["verdict"]).upper()
             evaluation["issues"] = list(evaluation["issues"] or [])
+            evaluation["evaluation_error"] = False
 
             evaluation["verdict"] = (
                 "PASS"
@@ -2935,6 +3137,7 @@ class AdaptiveRAG:
                 "faithful": False,
                 "complete": False,
                 "verdict": "FAIL",
+                "evaluation_error": True,
                 "issues": [
                     f"RAG quality evaluation failed: {error}"
                 ],
@@ -2981,8 +3184,10 @@ class AdaptiveRAG:
         )
 
         llm_before = API_TRACKER.llm_snapshot()
+        retrieval_start = time.perf_counter()
 
         if profile.mode == "summary":
+            generation_start = time.perf_counter()
             if self.engine is None:
                 self.build_router()
 
@@ -3005,6 +3210,7 @@ class AdaptiveRAG:
             )
             retrieved_nodes = retrieved_nodes or []
 
+            generation_start = time.perf_counter()
             generated_answer = self.synthesize_answer(
                 question,
                 retrieved_nodes,
@@ -3013,6 +3219,9 @@ class AdaptiveRAG:
                 node_with_score.node.get_content()
                 for node_with_score in retrieved_nodes
             ]
+
+        retrieval_seconds = time.perf_counter() - retrieval_start
+        generation_seconds = time.perf_counter() - generation_start
 
         API_TRACKER.record_llm_operation(
             "answer_generation",
@@ -3029,18 +3238,56 @@ class AdaptiveRAG:
         while attempt < max_retries:
             attempt += 1
 
+            evaluation_start = time.perf_counter()
             evaluation = self.evaluate_rag_response(
                 question=question,
                 answer=generated_answer,
                 contexts=retrieved_contexts,
             )
+            evaluation_seconds = time.perf_counter() - evaluation_start
+            API_TRACKER.record_query_stages(
+                retrieval=retrieval_seconds if attempt == 1 else 0.0,
+                generation=generation_seconds if attempt == 1 else 0.0,
+                evaluation=evaluation_seconds,
+            )
 
             self.print_evaluation(evaluation)
 
             if evaluation["verdict"] == "PASS":
-                break
+                print(
+                    f"\n[ANSWER] (Verified on Attempt {attempt})"
+                )
+                print(generated_answer)
+                print("=" * 70)
+                query_seconds = time.perf_counter() - query_start
+                API_TRACKER.record_query(
+                    1,
+                    query_seconds,
+                    len(retrieved_contexts),
+                )
+                API_TRACKER.print_query_usage(
+                    llm_before,
+                    strategy=profile.mode,
+                    retrieved_nodes=len(retrieved_contexts),
+                    query_seconds=query_seconds,
+                )
+                return generated_answer
 
             if attempt >= max_retries:
+                break
+
+            if evaluation.get("evaluation_error"):
+                print(
+                    "[GUARDRAIL] RAG evaluator failed. "
+                    "Skipping self-correction because the failure is not a generation-quality signal."
+                )
+                break
+
+            if not evaluation["relevant"]:
+                print(
+                    "[GUARDRAIL] Required evidence was not found in the retrieved context. "
+                    "Skipping self-correction."
+                )
                 break
 
             print(
@@ -3110,14 +3357,6 @@ class AdaptiveRAG:
             retrieved_nodes=len(retrieved_contexts),
             query_seconds=query_seconds,
         )
-
-        if evaluation and evaluation["verdict"] == "PASS":
-            print(
-                f"\\n[ANSWER] (Verified on Attempt {attempt})"
-            )
-            print(generated_answer)
-            print("=" * 70)
-            return generated_answer
 
         print(
             "[GUARDRAIL BLOCK] Maximum self-correction "
