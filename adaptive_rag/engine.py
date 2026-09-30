@@ -10,18 +10,17 @@ from typing import Dict, List, Tuple
 import qdrant_client
 from json_repair import repair_json
 from llama_index.core import (
-    Document, Settings, SummaryIndex, StorageContext, VectorStoreIndex,
+    Settings, SummaryIndex, StorageContext, VectorStoreIndex,
     load_index_from_storage,
 )
-from llama_index.core.ingestion import IngestionPipeline
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, NodeWithScore
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 
 from .chunking import AdaptiveChunker
-from .config import DATA_DIR, MANIFEST_FILE, STORAGE_DIR
+from .config import STORAGE_DIR
 from .documents import (
     calculate_document_id, calculate_file_hash, discover_files, load_manifest,
-    load_single_file, profile_document, save_manifest,
+    load_single_file, save_manifest,
 )
 from .observability import API_TRACKER
 from .models import configure_models

@@ -1,8 +1,10 @@
 import re
 from typing import List
+from pathlib import Path
 
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter, MarkdownNodeParser, CodeSplitter
+from llama_index.core.ingestion import IngestionPipeline
 
 from .documents import DocumentProfile, profile_document
 

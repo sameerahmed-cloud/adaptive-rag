@@ -40,7 +40,5 @@ TEXT_EXTENSIONS = {
     ".xml", ".yaml", ".yml", ".toml",
 }
 
-JSON_EXTENSION = {".json"}
-STRUCTURED_EXTENSIONS = {".csv", ".tsv"}
 SPREADSHEET_EXTENSIONS = {".xlsx", ".xls"}
 HTML_EXTENSIONS = {".html", ".htm"}
