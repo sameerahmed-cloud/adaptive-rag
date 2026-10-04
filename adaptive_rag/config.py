@@ -1,27 +1,70 @@
-from pathlib import Path
+"""Configuration for the Adaptive RAG application.
+"""
+
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Google currently accepts GEMINI_API_KEY and GOOGLE_API_KEY.  We keep the
+# project's existing GEMINI_API_KEY name while supporting Google's alternate
+# environment variable as a compatibility fallback.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY missing from .env file.")
+# Runtime configuration is environment-driven so the same code can run
+# locally, in Docker, or in a hosted environment without editing source code.
+QDRANT_URL = "http://localhost:6333"
+QDRANT_COLLECTION = "pipeline_collection"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 
-if not LLAMA_CLOUD_API_KEY:
-    raise ValueError("LLAMA_CLOUD_API_KEY missing from .env file.")
+MAX_EMBEDDING_TOKENS = 512
+EMBEDDING_SPECIAL_TOKENS = 2
+EMBEDDING_METADATA_RESERVE = 48
+FALLBACK_TOKEN_MARGIN = 0.75
 
-DATA_DIR = Path("./data")
+SHORT_TEXT_MAX_WORDS = 350    
+MIN_CHUNK_TOKENS = 64             
+CHUNK_OVERLAP_RATIO = 0.10
+MIN_CHUNK_OVERLAP = 30
+CHARS_PER_TOKEN_CODE = 3
+
+CHUNK_SIZE_TIERS = [(5000, 400), (20000, 375), (100000, 350)]
+CHUNK_SIZE_DEFAULT = 300
+
+CODE_LINE_TIERS = [(100, 80), (500, 60), (2000, 50), (5000, 40)]
+CODE_LINE_DEFAULT = 30
+
+EMBED_METADATA_KEYS = {"file_name", "sheet_name", "header_path", "page_label"}
+LLM_METADATA_KEYS = {"file_name", "sheet_name", "header_path", "page_label"}
+
+MAX_UPLOAD_SIZE_MB = 100
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+DATA_DIR = Path( "./data")
 STORAGE_DIR = Path("./storage")
 MANIFEST_FILE = STORAGE_DIR / "document_manifest.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-LLAMA_PARSE_EXTENSIONS = {".pdf", ".docx", ".pptx", ".doc"}
+# LlamaParse is the managed parser for complex/unstructured files.  Image
+# formats are included because the current LlamaParse platform is designed for
+# scans and document images as well as office documents.
+LLAMA_PARSE_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".doc",
+    ".pptx",
+    ".ppt",
+    ".pptm",
+    ".png",
+    ".jpg",
+    ".jpeg",
+}
 
 MARKDOWN_EXTENSIONS = {".md", ".markdown"}
 
@@ -42,3 +85,21 @@ TEXT_EXTENSIONS = {
 
 SPREADSHEET_EXTENSIONS = {".xlsx", ".xls"}
 HTML_EXTENSIONS = {".html", ".htm"}
+
+PROFILE_USE_LLM = False
+
+RETRIEVAL_TOP_K = 5          # chunks sent to the LLM
+CANDIDATE_TOP_K = 12         # chunks fetched per retriever before reranking
+MAX_EXPANSION_NODES = 4      # max neighbour chunks added around boundary hits
+SUMMARY_MAX_NODES = 12       # hard cap on chunks used for "summary" questions
+
+MIN_RETRIEVAL_SCORE = None
+
+MAX_QUESTION_CHARS = 2000    # longer questions are rejected before any model call
+REQUIRE_CITATIONS = True     # answers must cite supporting chunks as [Context N]
+LLM_RETRY_ATTEMPTS = 3       # transient LLM failures are retried with backoff
+
+INGEST_WORKERS = 4           # files parsed/chunked in parallel (1 = sequential)
+MAX_INGEST_ATTEMPTS = 3      # a failing file is retried this many times, then
+                             # skipped until its content changes
+PARSE_CACHE_DIR = Path("./cache") / "parsed"

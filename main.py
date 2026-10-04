@@ -4,6 +4,7 @@ import warnings
 logging.getLogger("qdrant_client").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("llama_index").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 

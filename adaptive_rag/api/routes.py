@@ -26,6 +26,11 @@ def health(rag: AdaptiveRAG = Depends(get_rag_engine)):
         knowledge_base="ready" if rag.vector_index is not None else "not_initialized",
     )
 
+@router.get("/metrics", tags=["system"])
+def metrics():
+    from adaptive_rag.observability import API_TRACKER
+    return API_TRACKER.snapshot()
+
 
 @router.post("/query", response_model=QueryResponse, tags=["rag"])
 def query(
@@ -147,7 +152,7 @@ def delete_document(
     document_id: str,
     rag: AdaptiveRAG = Depends(get_rag_engine),
 ):
-    # 1. Map the document_id to the file path using the current manifest
+   
     matching_path = next(
         (relative_path for relative_path, record in rag.manifest.items() 
          if record.get("document_id") == document_id),
@@ -161,23 +166,14 @@ def delete_document(
         )
 
     try:
-        # 2. Remove the physical file FIRST (just like you do when you do it manually!)
+        
         file_path = rag.data_dir / matching_path
         file_path.unlink(missing_ok=True)
 
-        # 3. FORCE the RAG instance to dump its active in-memory LlamaIndex caches.
-        # This simulates closing the terminal and opening it fresh.
-        if hasattr(rag, "clear_memory_cache"):
-            rag.clear_memory_cache()
-        else:
-            # If you don't have a clear function, reset the storage contexts manually
-            rag.vector_index = None
-            rag.summary_index = None
-            # Force your dependency or initialization logic to reload them from disk
-            rag.load_indexes() 
+        rag.vector_index = None
+        rag.summary_index = None
+        rag.load_indexes() 
 
-        # 4. Trigger sync. Now it safely calculates (old_paths - current_paths) 
-        # exactly like your terminal script does!
         rag.sync(force_rebuild=False)
 
         return DeleteResponse(message=f"Document '{matching_path}' deleted successfully.")
