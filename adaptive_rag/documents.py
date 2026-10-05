@@ -14,7 +14,7 @@ from llama_index.readers.file import HTMLTagReader
 from llama_parse import LlamaParse
 
 from .config import (
-    CODE_LANGUAGES, HTML_EXTENSIONS, LLAMA_PARSE_EXTENSIONS, LLAMA_CLOUD_API_KEY,
+    CODE_LANGUAGES, HTML_EXTENSIONS, LLAMA_PARSE_EXTENSIONS, LLAMA_CLOUD_API_KEY, PARSE_CACHE_DIR,
     MANIFEST_FILE, MARKDOWN_EXTENSIONS, SPREADSHEET_EXTENSIONS, TEXT_EXTENSIONS, STORAGE_DIR, PROFILE_USE_LLM,
 )
 from .observability import API_TRACKER
@@ -353,19 +353,6 @@ def _llm_structure_cached(text: str, filters: dict) -> Dict[str, bool]:
         _LLM_PROFILE_CACHE[key] = evaluate_content_structure_llm(text, filters)
  
     return _LLM_PROFILE_CACHE[key]
-
-def prune_parse_cache(live_hashes: set, max_age_days: int = 30) -> int:
-    """Delete cache entries for files no longer indexed (and old-version entries)."""
-    if not PARSE_CACHE_DIR.exists():
-        return 0
-    removed, cutoff = 0, time.time() - max_age_days * 86400
-    for path in PARSE_CACHE_DIR.glob("*.json"):
-        stale_version = not path.name.endswith(f".{PARSE_CACHE_VERSION}.json")
-        orphaned = path.name.split(".")[0] not in live_hashes and path.stat().st_mtime < cutoff
-        if stale_version or orphaned:
-            path.unlink()
-            removed += 1
-    return removed
  
  
 def profile_document(path: Path, extracted_text: Optional[str] = None) -> DocumentProfile:
@@ -460,6 +447,7 @@ def attach_document_identity(
     path: Path,
     document_id: str,
     file_hash: str,
+    part_index: int = 0,
 ):
 
     document.doc_id = document_id
@@ -476,6 +464,60 @@ def attach_document_identity(
         }
     )
 
+PARSE_CACHE_VERSION = "markdown-v1"
+
+def prune_parse_cache(live_hashes: set, max_age_days: int = 30) -> int:
+    """Delete cache entries for files no longer indexed (and old-version entries)."""
+    if not PARSE_CACHE_DIR.exists():
+        return 0
+    removed, cutoff = 0, time.time() - max_age_days * 86400
+    for path in PARSE_CACHE_DIR.glob("*.json"):
+        stale_version = not path.name.endswith(f".{PARSE_CACHE_VERSION}.json")
+        orphaned = path.name.split(".")[0] not in live_hashes and path.stat().st_mtime < cutoff
+        if stale_version or orphaned:
+            path.unlink()
+            removed += 1
+    return removed
+
+def _parse_cache_path(file_hash: str) -> Path:
+    return PARSE_CACHE_DIR / f"{file_hash}.{PARSE_CACHE_VERSION}.json"
+ 
+ 
+def load_cached_parse(file_hash: str) -> Optional[List[Document]]:
+    """Return previously parsed documents for this exact file content, or None."""
+    try:
+        data = json.loads(_parse_cache_path(file_hash).read_text(encoding="utf-8"))
+        documents = [
+            Document(text=item["text"], metadata=item.get("metadata", {}))
+            for item in data
+            if item.get("text", "").strip()
+        ]
+        return documents or None
+    except Exception:
+        return None  # missing or corrupt cache entry: just parse again
+ 
+ 
+def save_cached_parse(file_hash: str, documents: List[Document]) -> None:
+    """Store parser output. Failures are logged, never raised."""
+    if not documents:
+        return
+    path = _parse_cache_path(file_hash)
+    temp = path.with_suffix(".tmp")
+    try:
+        PARSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {"text": doc.text, "metadata": doc.metadata} for doc in documents
+        ]
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        os.replace(temp, path)  # atomic: a reader never sees half a file
+    except Exception as error:
+        print(f"--> [WARNING] Could not cache parse result: {error}")
+        if temp.exists():
+            temp.unlink()
+ 
 
 def load_single_file(
     path: Path,
@@ -492,10 +534,15 @@ def load_single_file(
     parsed_documents: List[Document] = []
 
     if extension in LLAMA_PARSE_EXTENSIONS:
-        parser = create_llama_parser()
-        parse_start = time.perf_counter()
-        parsed_documents = parser.load_data(str(path))
-        API_TRACKER.record_llama_parse(time.perf_counter() - parse_start)
+       parsed_documents = load_cached_parse(file_hash) or []
+       if parsed_documents:
+           print(f"--> [PARSE CACHE] {path.name}: reused previous parse")
+       else:
+           parser = create_llama_parser()
+           parse_start = time.perf_counter()
+           parsed_documents = parser.load_data(str(path))
+           API_TRACKER.record_llama_parse(time.perf_counter() - parse_start)
+           save_cached_parse(file_hash, parsed_documents)
 
     elif extension in MARKDOWN_EXTENSIONS or extension in CODE_LANGUAGES:
         text = path.read_text(encoding="utf-8", errors="ignore")

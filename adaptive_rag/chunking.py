@@ -351,7 +351,7 @@ class AdaptiveChunker:
     # Helpers
     # ------------------------------------------------------------------ #
 
-     def _sentence_splitter(self, size: int) -> SentenceSplitter:
+    def _sentence_splitter(self, size: int) -> SentenceSplitter:
         # Passing `tokenizer` makes the splitter count in the embedder's own
         # tokens instead of its default GPT tokenizer.
         return SentenceSplitter(

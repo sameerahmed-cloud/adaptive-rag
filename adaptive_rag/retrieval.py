@@ -8,6 +8,15 @@ from llama_index.core.schema import NodeWithScore
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
+STOP_WORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "what", "when", "where",
+    "who", "why", "how", "did", "does", "do", "and", "or", "to", "of", "in",
+    "on", "for", "from", "with", "about", "this", "that", "these", "those",
+    "it", "its", "be", "by", "as", "at", "which", "than", "can", "could",
+    "should", "would", "will", "me", "my", "you", "your", "tell", "give",
+    "please", "there", "their", "them", "has", "have", "had",
+})
+
 # Metadata worth matching lexically. Deliberately NOT included:
 #   file_path       absolute path pieces ("users", "home", "data") would match
 #                   unrelated queries for every chunk of every file
@@ -119,6 +128,9 @@ class LexicalIndex:
             return []
 
         query_terms = self.tokenize(query)
+        # Words like "what", "does", "do" occur in almost every chunk and made
+        # unrelated documents match. Keep them only if nothing else is left.
+        query_terms = [t for t in query_terms if t not in STOP_WORDS] or query_terms
         if not query_terms:
             return []
 

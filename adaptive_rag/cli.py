@@ -21,18 +21,15 @@ def _print_sync_report(report: dict) -> None:
 
 
 def _print_sources(sources: list) -> None:
-    seen = set()
-    lines = []
+    if not sources:
+        return
+    print("\n[SOURCES]")
     for source in sources:
         section = source.get("header_path") or source.get("sheet_name") or ""
-        key = (source.get("file_name"), section)
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.append(f"  - {source.get('file_name') or 'unknown'} {section}".rstrip())
-    if lines:
-        print("\n[SOURCES]")
-        print("\n".join(lines))
+        print(
+            f"  [Context {source.get('context')}] "
+            f"{source.get('file_name') or 'unknown'} {section}".rstrip()
+        )
 
 
 def run(argv=None):
@@ -61,8 +58,11 @@ def run(argv=None):
 
     _print_sync_report(report)
     API_TRACKER.print_sync_observability()
-    print("--> [SYSTEM LOG] Sync finished. Knowledge base is online.")
-
+    if rag.is_ready():
+        print("--> [SYSTEM LOG] Sync finished. Knowledge base is online.")
+    else:
+        print("--> [SYSTEM LOG] WARNING: nothing was indexed, so the knowledge base is empty. "
+          "Fix the errors above and restart.")
     print("\n" + "=" * 60)
     print("ADAPTIVE RAG KNOWLEDGE BASE")
     print("  Type your questions below. Type 'exit' or 'quit' to close.")

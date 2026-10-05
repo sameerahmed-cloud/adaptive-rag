@@ -97,9 +97,9 @@ MIN_RETRIEVAL_SCORE = None
 
 MAX_QUESTION_CHARS = 2000    # longer questions are rejected before any model call
 REQUIRE_CITATIONS = True     # answers must cite supporting chunks as [Context N]
-LLM_RETRY_ATTEMPTS = 3       # transient LLM failures are retried with backoff
+LLM_RETRY_ATTEMPTS = 2       # transient LLM failures are retried with backoff
 
-INGEST_WORKERS = 4           # files parsed/chunked in parallel (1 = sequential)
+INGEST_WORKERS = 1           # files parsed/chunked in parallel (1 = sequential)
 MAX_INGEST_ATTEMPTS = 3      # a failing file is retried this many times, then
                              # skipped until its content changes
 PARSE_CACHE_DIR = Path("./cache") / "parsed"

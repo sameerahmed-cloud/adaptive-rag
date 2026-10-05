@@ -1061,7 +1061,6 @@ class AdaptiveRAG:
                     "path": relative_path, "error": failure["error"],
                     "attempts": failure["attempts"],
                 })
-                print(f"--> [SKIP] {relative_path}: {failure['error']}")
 
         # Swap phase: short, locked.
         with self._state_lock:
@@ -1090,7 +1089,8 @@ class AdaptiveRAG:
         report["duration_seconds"] = round(time.perf_counter() - sync_start, 3)
         self.last_sync_report = report
         API_TRACKER.record_sync(time.perf_counter() - sync_start)
-        print("--> [DONE] RAG rebuild completed.")
+        print("--> [DONE] RAG rebuild completed." if all_nodes
+            else "--> [WARNING] Rebuild finished, but no documents were indexed.")
 
     def insert_nodes(
         self,
@@ -1665,21 +1665,26 @@ class AdaptiveRAG:
     # Generation and guardrails
     # ------------------------------------------------------------------ #
 
-    def _llm_complete(self, prompt: str) -> str:
-        """LLM call with bounded retries and exponential backoff.
+    def _llm_complete(self, prompt: str, label: str = "llm") -> str:
+        """LLM call with bounded retries, backoff and per-call timing.
 
         Must be called WITHOUT holding a lock (it may sleep).
         """
         delay = 1.0
         for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+            started = time.perf_counter()
             try:
-                return Settings.llm.complete(prompt).text.strip()
+                text = Settings.llm.complete(prompt).text.strip()
+                elapsed = time.perf_counter() - started
+                log = logger.warning if elapsed > 10 else logger.info
+                log("LLM %s call took %.1fs (%d prompt chars)", label, elapsed, len(prompt))
+                return text
             except Exception as error:
                 if attempt == LLM_RETRY_ATTEMPTS:
                     raise LLMUnavailableError(str(error)) from error
                 logger.warning(
-                    "LLM call failed (attempt %d/%d): %s",
-                    attempt, LLM_RETRY_ATTEMPTS, error,
+                    "LLM %s call failed (attempt %d/%d): %s",
+                    label, attempt, LLM_RETRY_ATTEMPTS, error,
                 )
                 time.sleep(delay)
                 delay *= 2
@@ -1737,7 +1742,7 @@ class AdaptiveRAG:
             Provide a concise, factual answer.
             """
 
-        return self._llm_complete(prompt)
+        return self._llm_complete(prompt, "answer")
 
     def build_router(self):
         """
@@ -1859,7 +1864,7 @@ class AdaptiveRAG:
 
         try:
             llm_before = API_TRACKER.llm_snapshot()
-            result = self._llm_complete(eval_prompt)
+            result = self._llm_complete(eval_prompt, "evaluation")
             API_TRACKER.record_llm_operation(
                 "rag_quality_evaluation",
                 llm_before,
@@ -1947,13 +1952,14 @@ class AdaptiveRAG:
             return nodes or []
 
     @staticmethod
-    def _source_info(item: NodeWithScore, id_to_path: Dict[str, str]) -> Dict:
+    def _source_info(item: NodeWithScore, id_to_path: Dict[str, str], number: Optional[int] = None) -> Dict:
         """Citation payload for the UI. Never exposes absolute server paths."""
         node = item.node
         metadata = getattr(node, "metadata", {}) or {}
         document_id = metadata.get("document_id") or node.ref_doc_id
         text = node.get_content().strip()
         return {
+            "context": number,
             "file_name": metadata.get("file_name"),
             "relative_path": id_to_path.get(document_id),
             "document_id": document_id,
@@ -1963,6 +1969,20 @@ class AdaptiveRAG:
             "score": round(float(item.score), 4) if item.score is not None else None,
             "snippet": text[:240] + ("..." if len(text) > 240 else ""),
         }
+    
+    @staticmethod
+    def _cited_nodes(answer: str, nodes: list) -> list:
+        """(context_number, node) pairs for the blocks the answer cites.
+
+        Falls back to every block if the answer contains no valid citation.
+        """
+        numbers = sorted({
+            int(n)
+            for match in _CITATION_RE.finditer(answer)
+            for n in re.findall(r"\d+", match.group(1))
+            if 1 <= int(n) <= len(nodes)
+        })
+        return [(i, nodes[i - 1]) for i in numbers] or list(enumerate(nodes, start=1))
 
     def ask(
         self,
@@ -2021,6 +2041,12 @@ class AdaptiveRAG:
                 rec["document_id"]: path
                 for path, rec in self.manifest_snapshot().items()
             }
+
+            if status == "verified":
+                numbered = self._cited_nodes(answer, used)
+            else:
+                numbered = list(enumerate(used, start=1))
+
             return {
                 "answer": answer,
                 "status": status,
@@ -2029,7 +2055,7 @@ class AdaptiveRAG:
                 "strategy_reason": profile.reason,
                 "attempts": attempts,
                 "sources": (
-                    [self._source_info(n, id_to_path) for n in used]
+                    [self._source_info(n, id_to_path, i) for i, n in numbered]
                     if include_sources else []
                 ),
                 "evaluation": evaluation,
@@ -2223,7 +2249,7 @@ class AdaptiveRAG:
 
             try:
                 correction_before = API_TRACKER.llm_snapshot()
-                generated_answer = self._llm_complete(correction_prompt)
+                generated_answer = self._llm_complete(correction_prompt, "correction")
                 API_TRACKER.record_llm_operation(
                     "self_correction",
                     correction_before,

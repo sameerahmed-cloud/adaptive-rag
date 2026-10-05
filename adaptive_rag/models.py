@@ -88,6 +88,8 @@ def configure_models():
         Settings.llm = GoogleGenAI(
             model=GEMINI_MODEL,
             api_key=GEMINI_API_KEY,
+            max_retries=1,
+            http_options={"timeout": 30_000},   # milliseconds
         )
 
         Settings.embed_model = TimedHuggingFaceEmbedding(

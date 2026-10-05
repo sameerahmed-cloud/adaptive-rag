@@ -17,3 +17,4 @@ data/
 README.md
 .env.example
 .ruff_cache/
+cache/
