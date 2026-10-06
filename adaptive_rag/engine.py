@@ -50,6 +50,9 @@ NOT_READY_MESSAGE = (
 LLM_UNAVAILABLE_MESSAGE = (
     "The language model is temporarily unavailable. Please try again in a moment."
 )
+KNOWLEDGE_BASE_UNAVAILABLE_MESSAGE = (
+    "The knowledge base is temporarily unavailable. Please try again shortly."
+)
 
 STOP_WORDS = frozenset({
     "the", "a", "an", "is", "are", "was", "were", "what", "when", "where",
@@ -322,8 +325,10 @@ class AdaptiveRAG:
         failed = {p: r for p, r in manifest.items() if r.get("status") == "failed"}
         indexed = {p: r for p, r in manifest.items() if r.get("status") != "failed"}
 
+        index_loaded = self.is_ready()
         return {
-            "ready": self.is_ready(),
+            "ready": index_loaded and qdrant_ok,
+            "index_loaded": index_loaded,
             "qdrant_reachable": qdrant_ok,
             "documents_indexed": len(indexed),
             "documents_failed": len(failed),
@@ -2076,7 +2081,11 @@ class AdaptiveRAG:
 
         # ---- retrieval (locked, no LLM) ----
         retrieval_start = time.perf_counter()
-        retrieved_nodes = self._gather_context(question, profile)
+        try:
+            retrieved_nodes = self._gather_context(question, profile)
+        except Exception as error:
+            logger.exception("Retrieval failed: %s", error)
+            return finish(KNOWLEDGE_BASE_UNAVAILABLE_MESSAGE, "error")
         retrieval_seconds = time.perf_counter() - retrieval_start
 
         if not retrieved_nodes:
@@ -2156,7 +2165,11 @@ class AdaptiveRAG:
                         is_complex=profile.is_complex,
                     )
                     recovery_start = time.perf_counter()
-                    recovery_nodes = self._gather_context(question, recovery_profile)
+                    try:
+                        recovery_nodes = self._gather_context(question, recovery_profile)
+                    except Exception as error:
+                        logger.exception("Recovery retrieval failed: %s", error)
+                        recovery_nodes = []
                     recovery_retrieval_seconds = time.perf_counter() - recovery_start
 
                     current_ids = {item.node.node_id for item in retrieved_nodes}

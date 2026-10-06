@@ -11,10 +11,10 @@ from typing import Dict, List, Optional, Tuple, Any
 from json_repair import repair_json
 from llama_index.core import Document, Settings, SimpleDirectoryReader
 from llama_index.readers.file import HTMLTagReader
-from llama_parse import LlamaParse
+from llama_cloud import LlamaCloud
 
 from .config import (
-    CODE_LANGUAGES, HTML_EXTENSIONS, LLAMA_PARSE_EXTENSIONS, LLAMA_CLOUD_API_KEY, PARSE_CACHE_DIR,
+    CODE_LANGUAGES, HTML_EXTENSIONS, LLAMA_PARSE_EXTENSIONS, LLAMA_CLOUD_API_KEY, PARSE_CACHE_DIR, LLAMA_PARSE_TIER,
     MANIFEST_FILE, MARKDOWN_EXTENSIONS, SPREADSHEET_EXTENSIONS, TEXT_EXTENSIONS, STORAGE_DIR, PROFILE_USE_LLM,
 )
 from .observability import API_TRACKER
@@ -427,19 +427,37 @@ def profile_document(path: Path, extracted_text: Optional[str] = None) -> Docume
     return profile
 
 
-def create_llama_parser():
-    """Create the managed parser only when a parse operation is requested."""
+def parse_with_llama_cloud(path: Path) -> List[Document]:
+    """Parse one file with the current LlamaParse API (v2). One Document per page."""
     if not LLAMA_CLOUD_API_KEY:
         raise RuntimeError(
             "LLAMA_CLOUD_API_KEY is required for complex document parsing. "
             "Add it to the environment or .env file."
         )
 
-    return LlamaParse(
-        api_key=LLAMA_CLOUD_API_KEY,
-        result_type="markdown",
-        verbose=False,
+    # The client reads LLAMA_CLOUD_API_KEY from the environment (config.py loads
+    # .env into it). One client per call, so parallel ingestion threads do not
+    # share a single object.
+    client = LlamaCloud()
+
+    uploaded = client.files.create(file=str(path), purpose="parse")
+    result = client.parsing.parse(
+        file_id=uploaded.id,
+        tier=LLAMA_PARSE_TIER,
+        version="latest",
+        expand=["markdown"],
     )
+
+    pages = result.markdown.pages
+    failed = [page.page_number for page in pages if not page.success]
+    if failed:
+        print(f"--> [WARNING] {path.name}: {len(failed)} page(s) failed to parse: {failed[:10]}")
+
+    return [
+        Document(text=page.markdown, metadata={"page_label": str(page.page_number)})
+        for page in pages
+        if page.success and page.markdown and page.markdown.strip()
+    ]
 
 
 def attach_document_identity(
@@ -464,7 +482,7 @@ def attach_document_identity(
         }
     )
 
-PARSE_CACHE_VERSION = "markdown-v1"
+PARSE_CACHE_VERSION = f"cloud-v2-{LLAMA_PARSE_TIER}"
 
 def prune_parse_cache(live_hashes: set, max_age_days: int = 30) -> int:
     """Delete cache entries for files no longer indexed (and old-version entries)."""
@@ -534,15 +552,14 @@ def load_single_file(
     parsed_documents: List[Document] = []
 
     if extension in LLAMA_PARSE_EXTENSIONS:
-       parsed_documents = load_cached_parse(file_hash) or []
-       if parsed_documents:
-           print(f"--> [PARSE CACHE] {path.name}: reused previous parse")
-       else:
-           parser = create_llama_parser()
-           parse_start = time.perf_counter()
-           parsed_documents = parser.load_data(str(path))
-           API_TRACKER.record_llama_parse(time.perf_counter() - parse_start)
-           save_cached_parse(file_hash, parsed_documents)
+        parsed_documents = load_cached_parse(file_hash) or []
+        if parsed_documents:
+            print(f"--> [PARSE CACHE] {path.name}: reused previous parse")
+        else:
+            parse_start = time.perf_counter()
+            parsed_documents = parse_with_llama_cloud(path)
+            API_TRACKER.record_llama_parse(time.perf_counter() - parse_start)
+            save_cached_parse(file_hash, parsed_documents)
 
     elif extension in MARKDOWN_EXTENSIONS or extension in CODE_LANGUAGES:
         text = path.read_text(encoding="utf-8", errors="ignore")

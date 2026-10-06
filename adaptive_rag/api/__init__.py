@@ -1,1 +1,1 @@
-"""FastAPI HTTP interface for the Adaptive RAG application."""
+"""HTTP API for the Adaptive RAG engine. Run: python -m adaptive_rag.api"""

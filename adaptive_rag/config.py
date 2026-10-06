@@ -14,6 +14,8 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY")
 
+LLAMA_PARSE_TIER = "cost_effective"
+
 # Runtime configuration is environment-driven so the same code can run
 # locally, in Docker, or in a hosted environment without editing source code.
 QDRANT_URL = "http://localhost:6333"
@@ -103,3 +105,29 @@ INGEST_WORKERS = 1           # files parsed/chunked in parallel (1 = sequential)
 MAX_INGEST_ATTEMPTS = 3      # a failing file is retried this many times, then
                              # skipped until its content changes
 PARSE_CACHE_DIR = Path("./cache") / "parsed"
+
+
+# Comma-separated keys, e.g.  ADAPTIVE_RAG_API_KEYS=key-for-web-app,key-for-admin
+# Leave EMPTY only on your own machine: with no keys, authentication is off.
+API_KEYS = [
+    key.strip()
+    for key in os.getenv("ADAPTIVE_RAG_API_KEYS", "").split(",")
+    if key.strip()
+]
+ 
+# Origins allowed to call the API from a browser (your web app's address).
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ADAPTIVE_RAG_CORS_ORIGINS", "http://localhost:3000,http://localhost:5173"
+    ).split(",")
+    if origin.strip()
+]
+ 
+API_HOST = os.getenv("ADAPTIVE_RAG_API_HOST", "127.0.0.1")
+API_PORT = int(os.getenv("ADAPTIVE_RAG_API_PORT", "8000"))
+ 
+SYNC_ON_STARTUP = True             # index the data folder when the server starts
+ASK_RATE_LIMIT_PER_MINUTE = 3     # per client; 0 disables
+MAX_CONCURRENT_QUERIES = 4         # questions processed at once
+QUERY_QUEUE_TIMEOUT_SECONDS = 20   # how long a question waits for a free slot
