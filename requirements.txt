@@ -1,0 +1,22 @@
+# Runtime dependencies (direct ones only).
+ 
+# --- RAG core ---
+llama-index-core==0.14.24
+llama-index-embeddings-huggingface==0.7.0
+llama-index-llms-google-genai==0.10.0
+llama-index-vector-stores-qdrant==0.10.3
+llama-index-readers-file==0.6.0
+qdrant-client==1.19.0
+transformers==5.15.1
+sentence-transformers==6.0.0
+llama_cloud==2.16.0
+json_repair==0.63.4
+python-dotenv==1.2.3
+openpyxl==3.1.5
+tree-sitter==0.26.0
+tree-sitter-language-pack==1.21.0
+
+# --- API ---
+fastapi==0.141.1
+uvicorn==0.54.0
+python-multipart==0.0.32

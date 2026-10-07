@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      # CPU-only PyTorch keeps the install small and fast.
+      - name: Install PyTorch (CPU)
+        run: pip install torch --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # The tests use a fake engine: no API keys, Qdrant or model downloads needed.
+      - name: Run tests
+        run: python -m pytest tests/api -q

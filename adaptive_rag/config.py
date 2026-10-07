@@ -18,7 +18,7 @@ LLAMA_PARSE_TIER = "cost_effective"
 
 # Runtime configuration is environment-driven so the same code can run
 # locally, in Docker, or in a hosted environment without editing source code.
-QDRANT_URL = "http://localhost:6333"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = "pipeline_collection"
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"

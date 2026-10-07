@@ -1,15 +1,36 @@
-version: '3.8'
+name: verity
 
 services:
-  qdrant_db:
-    image: qdrant/qdrant:latest
-    container_name: local_qdrant_service
+  qdrant:
+    image: qdrant/qdrant:latest        
+    restart: unless-stopped
     ports:
-      - "6333:6333"  # API port for your python script
-      - "6334:6334"  # Internal gRPC communication port
+      - "6333:6333"                    
     volumes:
-      - qdrant_storage:/qdrant/storage 
-    restart: always
+      - qdrant_data:/qdrant/storage
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    env_file: .env
+    environment:                       
+      QDRANT_URL: http://qdrant:6333
+      ADAPTIVE_RAG_API_HOST: 0.0.0.0
+      ADAPTIVE_RAG_DATA_DIR: /app/data
+      ADAPTIVE_RAG_STORAGE_DIR: /app/storage
+      ADAPTIVE_RAG_CACHE_DIR: /app/cache
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data               # documents (drop files here, or upload via the API)
+      - rag_storage:/app/storage       # index state + manifest
+      - rag_cache:/app/cache           # LlamaParse results, so rebuilds do not re-pay
+      - hf_cache:/app/.cache/huggingface   # embedding model, downloaded once
 
 volumes:
-  qdrant_storage:
+  qdrant_data:
+  rag_storage:
+  rag_cache:
+  hf_cache:
